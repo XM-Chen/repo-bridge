@@ -250,12 +250,27 @@ interface RgEvent {
   };
 }
 
+/**
+ * rg echoes the search root back in every path it reports: `rg -- .` yields
+ * `./src/App.ts`. The JS walker yields bare workspace-relative paths, and the
+ * gitignore/secret matchers — plus every caller — expect that one shape.
+ */
+function normaliseRgPath(text: string): string {
+  const posix = text.split(path.sep).join('/');
+  return posix.startsWith('./') ? posix.slice(2) : posix;
+}
+
 async function searchWithRipgrep(root: string, subPath: string, opts: SearchOptions): Promise<SearchResponse | null> {
   const started = Date.now();
   const maxResults = Math.max(1, Math.min(opts.maxResults ?? 100, 1000));
   const context = Math.max(0, Math.min(opts.contextLines ?? 0, 10));
+  const realRoot = realpathTolerant(root);
 
-  const args = ['--json', '--line-number', '--max-filesize', '5M', `--max-count=${maxResults}`];
+  // --follow brings rg in line with the JS walker: monorepos link packages into
+  // place, and a search that silently skips them is the worst kind of wrong. rg
+  // knows nothing about the sandbox, so links leaving the workspace are filtered
+  // out of its results below.
+  const args = ['--json', '--line-number', '--follow', '--max-filesize', '5M', `--max-count=${maxResults}`];
   if (!opts.regex) args.push('--fixed-strings');
   if (!opts.caseSensitive) args.push('--ignore-case');
   if (context) args.push(`--context=${context}`);
@@ -296,8 +311,13 @@ async function searchWithRipgrep(root: string, subPath: string, opts: SearchOpti
     }
     if (evt.type !== 'match' || !evt.data) continue;
 
-    const rel = (evt.data.path?.text ?? '').split(path.sep).join('/');
+    const rel = normaliseRgPath(evt.data.path?.text ?? '');
+    if (!rel) continue;
     if (isSecretPath(rel) && !isSecretTemplate(rel)) continue;
+    // --follow makes rg traverse links it has no sandbox opinion about, so the
+    // containment check the JS walker performs during the walk has to happen
+    // here instead — on the real path, exactly as resolvePath does it.
+    if (!isInside(realRoot, realpathTolerant(path.resolve(root, rel)))) continue;
     const lineNo = evt.data.line_number ?? 0;
     filesWithMatches.add(rel);
     matches.push({
