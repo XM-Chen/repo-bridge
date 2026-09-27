@@ -55,8 +55,16 @@ export function which(bin: string, cwd: string): string | null {
       try {
         const stat = fs.statSync(withExt);
         if (stat.isFile()) return withExt;
-      } catch {
-        /* keep looking */
+      } catch (e) {
+        // Windows app-execution aliases (the 0-byte stubs in WindowsApps, which
+        // is how juliaup, the Store Python build and others install) are
+        // protected reparse points: statSync throws EACCES on them, yet
+        // CreateProcess runs them perfectly well. Skipping those made a binary
+        // that plainly works from a shell report as "not found". EACCES means
+        // it exists but may not be stat'd, so accept it and let spawn surface a
+        // real error if it genuinely is not runnable.
+        if ((e as NodeJS.ErrnoException).code === 'EACCES') return withExt;
+        /* otherwise keep looking */
       }
     }
     return null;
