@@ -270,7 +270,13 @@ async function searchWithRipgrep(root: string, subPath: string, opts: SearchOpti
   // place, and a search that silently skips them is the worst kind of wrong. rg
   // knows nothing about the sandbox, so links leaving the workspace are filtered
   // out of its results below.
-  const args = ['--json', '--line-number', '--follow', '--max-filesize', '5M', `--max-count=${maxResults}`];
+  // --no-require-git: by default rg only honours .gitignore when the search root
+  // lives inside a git repository. Plenty of real workspaces are not repos —
+  // exported trees, scratch directories, a repo-in-progress — and the JS walker
+  // below honours .gitignore for all of them. Without this flag the two engines
+  // disagree, and search silently returns files the user explicitly ignored
+  // (build output, logs, vendored dumps).
+  const args = ['--json', '--line-number', '--follow', '--no-require-git', '--max-filesize', '5M', `--max-count=${maxResults}`];
   if (!opts.regex) args.push('--fixed-strings');
   if (!opts.caseSensitive) args.push('--ignore-case');
   if (context) args.push(`--context=${context}`);
