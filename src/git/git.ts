@@ -43,7 +43,7 @@ export async function git(cwd: string, args: string[], opts: GitOptions = {}): P
       cwd,
       timeoutMs: opts.timeoutMs ?? Math.min(cfg.exec.timeoutMs, 180_000),
       maxOutputBytes: opts.maxOutputBytes ?? cfg.exec.maxOutputBytes,
-      env: { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', ...opts.env },
+      env: { GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', ...opts.env },
     },
   );
 

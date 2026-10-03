@@ -206,3 +206,9 @@ Confirm the build itself is sound:
 ```bash
 npm run verify
 ```
+
+## Read-only diagnosis and tightened calls
+
+Run `repo-bridge doctor [--json] [--url URL]`. Exit 1 identifies readiness/config problems with distinct check IDs and next steps; 2 means diagnosis failed. No directories or OAuth clients are created. Local success does not confirm a ChatGPT connection.
+
+EXPLICIT_TARGET_REQUIRED: pass workspace/session_id. REVISION_CONFLICT: re-read and pass revision. SESSION_MISMATCH: align selectors. WORKSPACE_BUSY/NOT_STARTED: wait/cancel the Job. STATE_CORRUPT: stop bridges, preserve/back up the original, restore known-good state. Unknown execution outcome: inspect effects before manually deciding to retry. Published commit with recovery information: do not recommit; inspect HEAD/selected index entries. See [migration](UPGRADING-2.0.md).

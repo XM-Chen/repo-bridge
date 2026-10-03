@@ -91,22 +91,23 @@ export class OAuthStore {
     this.state = this.load();
   }
 
-  private load(): PersistedState {
+  private load(prune = true): PersistedState {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8')) as PersistedState;
       if (parsed.version === 1 && parsed.formKey) {
         // Drop anything already expired so the file does not grow without bound.
         const now = Date.now();
         for (const [hash, token] of Object.entries(parsed.tokens ?? {})) {
-          if (token.expiresAt <= now) delete parsed.tokens[hash];
+          if (prune && token.expiresAt <= now) delete parsed.tokens[hash];
         }
         parsed.clients ??= {};
         parsed.tokens ??= {};
         return parsed;
       }
-    } catch {
-      /* first run or unreadable — start clean */
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot read OAuth state ${this.file}; original preserved: ${(e as Error).message}`);
     }
+    if (fs.existsSync(this.file)) throw new Error(`Invalid OAuth state: ${this.file}`);
     return { version: 1, formKey: randomToken(32), clients: {}, tokens: {} };
   }
 
@@ -203,6 +204,7 @@ export class OAuthStore {
   }
 
   getClient(clientId: string): RegisteredClient | undefined {
+    this.state=this.load();
     return this.state.clients[clientId];
   }
 
@@ -214,6 +216,7 @@ export class OAuthStore {
   }
 
   listClients(): RegisteredClient[] {
+    this.state=this.load();
     return Object.values(this.state.clients).sort((a, b) => b.createdAt - a.createdAt);
   }
 
@@ -357,6 +360,7 @@ export class OAuthStore {
    * some other service from being replayed here.
    */
   validateAccessToken(token: string, expectedResource: string): { ok: true; record: TokenRecord } | { ok: false; reason: 'invalid_token' | 'expired_token' | 'wrong_audience' } {
+    this.state=this.load(false);
     const record = this.state.tokens[sha256(token)];
     if (!record || record.kind !== 'access') return { ok: false, reason: 'invalid_token' };
     if (record.expiresAt < Date.now()) return { ok: false, reason: 'expired_token' };
@@ -386,6 +390,7 @@ export class OAuthStore {
 
   /** Diagnostics only — never returns token material. */
   stats(): { clients: number; activeAccessTokens: number; activeRefreshTokens: number } {
+    this.state=this.load();
     const now = Date.now();
     const live = Object.values(this.state.tokens).filter((t) => t.expiresAt > now);
     return {

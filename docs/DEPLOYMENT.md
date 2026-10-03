@@ -168,7 +168,7 @@ USER bridge
 
 The bridge detects the build system from the repository, so anything on PATH and on the allowlist becomes usable immediately.
 
-Container isolation is a real second layer here: even a sandbox escape lands inside a container with no privileges, `no-new-privileges`, and only the volumes you mounted.
+Container isolation is a real second layer here: trusted build execution remains inside a container with no privileges, `no-new-privileges`, and only the volumes you mounted.
 
 ### Persistence
 
@@ -192,3 +192,7 @@ Two volumes: `/data` (workspace registry, session change logs, `audit.log`, and 
 - **Managed clones accumulate.** `workspace_close` with `delete_files=true` reclaims disk; the directory is `REPO_BRIDGE_MANAGED_ROOT`.
 - **Timeouts**: `REPO_BRIDGE_EXEC_TIMEOUT_MS` must be under your proxy's read timeout, or the proxy will cut a build the bridge would have finished.
 - **Upgrades**: `git pull && npm install && npm run build && npm run verify`, then restart. State in the data directory is forward-compatible and re-created if absent.
+
+## Upgrade and readiness
+
+Stop old bridge processes and back up the data directory before upgrading; old/new writers cannot share a directory. Store runtime data on a host-local filesystem. Run `repo-bridge doctor --json` using the service account environment before starting. It does not create directories or start services. Use `--url https://your-origin` for health, auth challenge and OAuth discovery probes, then test the real connector separately. Graceful shutdown waits for owned Job trees; crash recovery retains unknown records without restoring processes. See [2.0 migration](UPGRADING-2.0.md).

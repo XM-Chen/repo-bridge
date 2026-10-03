@@ -120,7 +120,25 @@ async function checkPathTokenMode(base, workspace) {
   check('tool call over HTTP works', /level: develop/.test(statusText), statusText);
   check('bridge_status reports the auth mode', /path-token/.test(statusText), statusText);
   check('bridge_status separates auth from permission', /does NOT affect the permission level/i.test(statusText), statusText);
+  const openedSession=await client.callTool({name:'workspace_open',arguments:{path:'demo'}});
+  check('HTTP workspace open is accepted',!openedSession.isError);
+  const started=await client.callTool({name:'session_start',arguments:{workspace:'demo',title:'reconnect'}});
+  const sid=started.structuredContent?.data?.id;check('HTTP creates explicit session',!!sid);
+  const launched=await client.callTool({name:'run_tests',arguments:{session_id:sid,command:'node -e "setTimeout(()=>console.log(42),800)"',wait_seconds:0,idempotency_key:'reconnect-test'}});
+  const jid=launched.structuredContent?.data?.id;check('HTTP accepts background Job',!!jid&&!launched.isError);
   await client.close();
+  const reconnected=new Client({name:'http-reconnected',version:'2.0.0'},{capabilities:{}});
+  await reconnected.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`),{requestInit:{headers:{Authorization:`Bearer ${TOKEN}`}}}));
+  const recovered=await reconnected.callTool({name:'job_status',arguments:{job_id:jid,wait_seconds:30}});
+  check('Job survives HTTP disconnect/reconnect',recovered.structuredContent?.data?.state==='completed'&&recovered.structuredContent?.data?.result?.exitCode===0);
+  const replay=await reconnected.callTool({name:'run_tests',arguments:{session_id:sid,command:'node -e "setTimeout(()=>console.log(42),800)"',wait_seconds:0,idempotency_key:'reconnect-test'}});
+  check('reconnect idempotency recovers original Job',replay.structuredContent?.data?.id===jid);
+  const report=await reconnected.callTool({name:'report_changes',arguments:{session_id:sid}});
+  check('reconnected validation evidence matches observed files',report.structuredContent?.data?.verification?.[0]?.current_code==='observed_match');
+  fs.appendFileSync(path.join(workspace,'README.md'),'\nExternal edit\n');
+  const stale=await reconnected.callTool({name:'report_changes',arguments:{session_id:sid}});
+  check('external editing invalidates HTTP validation evidence',stale.structuredContent?.data?.verification?.[0]?.current_code==='unproven');
+  await reconnected.close();
 
   const pathClient = new Client({ name: 'http-check-path', version: '1.0.0' }, { capabilities: {} });
   await pathClient.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${TOKEN}`)));

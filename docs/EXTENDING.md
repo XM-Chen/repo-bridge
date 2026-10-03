@@ -16,7 +16,7 @@ src/
     oauth-store.ts      clients, codes, hashed tokens, consent tickets
 
   security/
-    paths.ts            workspace sandbox, real-path containment
+    paths.ts            workspace path checks, real-path containment
     secrets.ts          credential-file denylist + output redaction
     permissions.ts      capability → required level
     commands.ts         tokeniser, executable allowlist, destructive rules
@@ -84,7 +84,7 @@ Add the array to `ALL_TOOLS` in `src/tools/index.ts`. Permission filtering, disp
 
 ### 3. Rules that are not optional
 
-- **Never touch a model-supplied path without `resolvePath`.** It is the sandbox.
+- **Never touch a model-supplied path without `resolvePath`.** It enforces file-tool containment; scripts still execute with host privileges.
 - **Never build a command string from model input and pass it to a shell.** Use `spawnArgv` with an argv array, or `parseCommand` if the model supplies the command line.
 - **Pick the honest capability.** `read` for inspection, `write` for file changes, `exec` for running things, `git_remote` / `forge` for anything that leaves the machine.
 - **Throw `BridgeError` with a hint.** The hint is the model's next action; "invalid argument" wastes a turn, "include more surrounding context to make the anchor unique" does not.
@@ -140,3 +140,7 @@ npm run verify
 - `scripts/http-check.mjs` — transport, auth, and permission filtering.
 
 When you add a tool that can refuse, add the refusal to the e2e security section. The tests that matter most are the ones asserting something does *not* happen.
+
+## Reliability contracts
+
+Workspace tool targeting is resolved centrally in tools/index.ts. Mutation handlers must use the resolved explicit target; do not infer sessions. New runtime state mutations use short transactions in fs/state.ts; no await/command while holding a filesystem lock. Job callbacks retain request identity. Use typed validation kinds, not command regex guesses. Tool handlers may return text or {text,data}; MCP emits the matching structured envelope. Do not return a generic failure after a mutation is already published—include outcome/recovery details instead.

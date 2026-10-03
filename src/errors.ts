@@ -3,6 +3,7 @@
  * the tool layer can return an actionable message instead of a stack trace.
  */
 export type BridgeErrorCode =
+  | 'LOCK_TIMEOUT' | 'REVISION_CONFLICT' | 'STATE_CORRUPT' | 'NOT_STARTED' | 'IDEMPOTENCY_CONFLICT' | 'SESSION_NOT_FOUND' | 'SESSION_CLOSED' | 'RECORD_LIMIT' | 'WORKSPACE_BUSY' | 'JOB_NOT_FOUND' | 'SESSION_MISMATCH' | 'EXPLICIT_TARGET_REQUIRED' | 'SESSION_BUSY'
   | 'NO_WORKSPACE'
   | 'WORKSPACE_NOT_FOUND'
   | 'PATH_OUTSIDE_WORKSPACE'

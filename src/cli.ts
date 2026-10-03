@@ -28,6 +28,7 @@ const HELP = `repo-bridge ${VERSION} — an MCP server that gives a coding agent
 
 USAGE
   repo-bridge [--stdio | --http | --both]
+  repo-bridge doctor [--json] [--url URL]
   repo-bridge clients
   repo-bridge revoke <client-id>
   repo-bridge --version | --help

@@ -10,7 +10,7 @@ import { audit } from '../logger.js';
 import { registry } from '../workspace/registry.js';
 import { createDir, deletePath, editFile, listDir, movePath, readFile, statPath, withLineNumbers, writeFile, type EditSpec } from '../fs/ops.js';
 import { findFiles, searchCode } from '../fs/search.js';
-import { block, join, kv, type Args, type ToolDef } from './types.js';
+import { block, join, kv, Args, type ToolDef } from './types.js';
 import { BridgeError } from '../errors.js';
 
 function ws(args: Args) {
@@ -18,10 +18,24 @@ function ws(args: Args) {
 }
 
 const workspaceParam = {
-  workspace: { type: 'string', description: 'Workspace alias. Defaults to the active workspace.' },
+  workspace: { type: 'string', description: 'Workspace alias or ID. Reads may use the active workspace; mutations/execution require workspace or session_id.' },
 };
 
 export const fileTools: ToolDef[] = [
+  {
+    name:'read_files',description:'Read up to eight known files/ranges with full revisions and a shared output budget. Each item may fail independently.',capability:'read',
+    inputSchema:{type:'object',properties:{...workspaceParam,files:{type:'array',minItems:1,maxItems:8,items:{type:'object',properties:{path:{type:'string'},start_line:{type:'integer',minimum:1},end_line:{type:'integer',minimum:1}},required:['path']}},max_bytes:{type:'integer',minimum:1024,maximum:120000}},required:['files']},
+    handler:async args=> {
+      const w=ws(args);const items=args.objArray('files');if(items.length>8)throw new BridgeError('INVALID_ARGUMENT','read_files accepts at most 8 files.');
+      let left=args.num('max_bytes',120000);if(!Number.isInteger(left)||left<1024||left>120000)throw new BridgeError('INVALID_ARGUMENT','max_bytes must be 1024..120000.');
+      const results=items.map(item=> {try {
+        const a=new Args(item,'read_files item');const r=readFile(w.root,a.str('path'),{startLine:a.optNum('start_line'),endLine:a.optNum('end_line')});
+        const buf=Buffer.from(r.content);let end=Math.min(buf.length,left);while(end>0&&end<buf.length&&(buf[end]!&0xc0)===0x80)end--;
+        r.content=buf.subarray(0,end).toString('utf8');left-=end;return {...r,output_truncated:end<buf.length};
+      }catch(e){return {path:item.path,error:(e as Error).message};}});
+      return {text:results.map(r=>'error' in r?`${r.path}: ${r.error}`:`${r.path} revision: ${r.revision}${r.output_truncated?' [output truncated]':''}\n${r.content}`).join('\n\n'),data:{files:results}};
+    }
+  },
   {
     name: 'list_dir',
     description:
@@ -86,7 +100,7 @@ export const fileTools: ToolDef[] = [
         `${result.path} — lines ${result.startLine}-${result.endLine} of ${result.totalLines}` +
         (result.truncated ? ' (partial)' : '') +
         `, ${formatBytes(result.bytes)}`;
-      return `${header}\n${'─'.repeat(Math.min(header.length, 80))}\n${body}`;
+      return { data: result, text: `${header}\nrevision: ${result.revision}\n${'─'.repeat(Math.min(header.length, 80))}\n${body}` };
     },
   },
 
@@ -213,7 +227,7 @@ export const fileTools: ToolDef[] = [
       if (!['create', 'overwrite', 'append'].includes(mode)) {
         throw new BridgeError('INVALID_ARGUMENT', `mode must be create, overwrite or append.`);
       }
-      const res = writeFile(w.root, args.str('path'), args.str('content', ''), mode);
+      const res = writeFile(w.root, args.str('path'), args.str('content', ''), mode, args.optStr('expected_revision'));
       registry().recordFile(w.id, res.path, res.action === 'created' ? 'created' : 'modified');
       audit({ action: 'write_file', workspace: w.alias, target: res.path, outcome: 'ok', detail: { mode } });
       return `${res.action} ${res.path} — ${res.lines} lines, ${formatBytes(res.bytes)}`;
@@ -260,7 +274,7 @@ export const fileTools: ToolDef[] = [
         };
       });
 
-      const res = editFile(w.root, args.str('path'), specs);
+      const res = editFile(w.root, args.str('path'), specs, args.optStr('expected_revision'));
       registry().recordFile(w.id, res.path, 'modified');
       audit({ action: 'edit_file', workspace: w.alias, target: res.path, outcome: 'ok', detail: { edits: res.editsApplied } });
       return join(

@@ -96,6 +96,8 @@ export function redact(input: string): string {
   for (const { re, replace } of REDACTION_RULES) {
     out = out.replace(re, replace);
   }
+  // Fail closed for an unterminated PEM block (including capped output).
+  out = out.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*$/g, '[REDACTED:private-key]');
   return out;
 }
 

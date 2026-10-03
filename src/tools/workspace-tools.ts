@@ -1,3 +1,5 @@
+import { assertIdle, reserveWorkspace } from '../runtime/store.js';
+import { gitWritePolicy } from '../git/commit.js';
 /**
  * Workspace lifecycle tools — the entry point of every session.
  */
@@ -98,7 +100,7 @@ export const workspaceTools: ToolDef[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        workspace: { type: 'string', description: 'Workspace alias. Defaults to the active workspace.' },
+        workspace: { type: 'string', description: 'Workspace alias or ID. Reads may use the active workspace; mutations/execution require workspace or session_id.' },
       },
     },
     handler: async (args) => {
@@ -111,7 +113,7 @@ export const workspaceTools: ToolDef[] = [
     name: 'repo_open_remote',
     description:
       'Clone (or refresh) a remote Git repository into an isolated managed workspace and check out a branch. Use for work on a repository that is not already on this machine. Returns the same project brief as workspace_open. Each task gets its own workspace so parallel tasks cannot interfere.',
-    capability: 'read',
+    capability: 'git_remote',
     sideEffecting: true,
     inputSchema: {
       type: 'object',
@@ -150,8 +152,11 @@ export const workspaceTools: ToolDef[] = [
             (w.task ?? '') === (task ?? ''),
         );
 
+      gitWritePolicy(true);
       const credentials = authConfig(remote.cloneUrl);
 
+      const release=existing?reserveWorkspace(existing.id):undefined;
+      try {
       let ws;
       if (existing && fs.existsSync(existing.root)) {
         await git(existing.root, ['fetch', '--all', '--prune'], { allowFail: true, config: credentials });
@@ -190,6 +195,7 @@ export const workspaceTools: ToolDef[] = [
 
       const target = wantedBranch ?? (await defaultBranch(ws.root)) ?? undefined;
       if (target && (await currentBranch(ws.root)) !== target) {
+        assertIdle(ws.id);
         const checkout = await git(ws.root, ['checkout', target], { allowFail: true });
         if (!checkout.ok) {
           throw new BridgeError('GIT_ERROR', `Could not check out "${target}": ${checkout.stderr.trim().split('\n')[0]}`, {
@@ -199,7 +205,8 @@ export const workspaceTools: ToolDef[] = [
       }
       if (ws.remote) ws.remote.baseBranch = target ?? ws.remote.baseBranch;
 
-      return buildBrief(ws, { includeInstructions: true });
+      return await buildBrief(ws, { includeInstructions: true });
+      } finally {release?.();}
     },
   },
 

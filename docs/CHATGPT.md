@@ -182,3 +182,7 @@ Some ChatGPT builds accept the second form with Authentication set to *None*, si
 - **One bridge, many clients.** Each authenticated client keeps its own active workspace, so a ChatGPT connector and a local stdio session cannot redirect each other's edits. **Several chats inside the same connector still share one** — MCP carries no conversation identity for the bridge to key on. When you run parallel work in one connector, pass `workspace` explicitly on each call, or give each task its own managed workspace with `repo_open_remote` and a distinct `task` label.
 - **The bridge does not read your ChatGPT conversation.** It only ever sees the arguments of the tool calls the model makes.
 - **Changing the public hostname invalidates the connector.** OAuth tokens are bound to the resource URL they were issued for, so a new tunnel URL means re-authorising. That is the audience check doing its job.
+
+## Reliable reconnect workflow
+
+Open a workspace, start a session, and pass session_id on edits/execution. Overwrites require read_file revision. Long checks return job_id after five seconds; recover with job_list/job_status/job_log after reconnecting. Connector disconnect does not cancel accepted work. Inspect report_changes for current observed_match; a historical pass may be unproven after edits. git_commit requires paths and expected_head from git_status. See [2.0 migration](UPGRADING-2.0.md).

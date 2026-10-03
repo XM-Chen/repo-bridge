@@ -68,7 +68,7 @@ Your code stays on your machine (or your own VPS). The bridge only ever sees the
 - **Real git workflow.** Branch, diff, commit, push, and open pull requests / merge requests.
 - **Session continuity.** "Continue working on quantix" resumes with branch, working-tree state, and everything the bridge changed — days later, in a new chat.
 - **Language agnostic.** Java/Spring, Node/TypeScript, React/Next.js, Python, Go, Rust, .NET, Ruby, PHP, Flutter, Android, Docker — detected from the repository, nothing hardcoded.
-- **Security you can explain.** Workspace sandbox, no shell, executable allowlist, credential files unreadable, protected branches, OAuth 2.1, full audit log.
+- **Security you can explain.** Workspace path checks, no shell, executable allowlist, credential files unreadable, protected branches, OAuth 2.1, full audit log.
 
 ---
 
@@ -153,7 +153,7 @@ The level is fixed at process start. Tools above it aren't even advertised to th
 
 ## Tools
 
-30 tools at `full` permission.
+39 tools at `full` permission.
 
 Plus an operator CLI, deliberately outside the model's reach — a model should not be able to grant or withdraw its own credentials:
 
@@ -181,7 +181,7 @@ Full reference: **[docs/TOOLS.md](docs/TOOLS.md)**
 The bridge assumes the model will sometimes be wrong, and that repository content may be hostile. Full model: **[docs/SECURITY.md](docs/SECURITY.md)**
 
 - **Authentication before anything else.** OAuth access tokens are opaque, stored only as hashes, audience-bound to this server's URL, expiring and revocable; refresh tokens rotate on use; consent forms are HMAC-signed against CSRF.
-- **Workspace sandbox.** Confined to the configured roots. Traversal, absolute escapes and symlinks leading outside are rejected — checked against the resolved real path, not the string.
+- **Workspace path checks.** Confined to the configured roots. Traversal, absolute escapes and symlinks leading outside are rejected — checked against the resolved real path, not the string.
 - **Credential files are unreadable.** `.env`, `*.pem`, SSH keys, cloud credentials, browser profiles — excluded from read *and* search. Commands still inherit real environment variables, so builds work without the model ever seeing the values.
 - **No shell.** Commands are tokenised and spawned as argv. `;`, `&&`, `|`, backticks and `$( )` are rejected — so text arriving from a README, a dependency, or a build log cannot chain a second process. This is the main structural defence against prompt injection.
 - **Executable allowlist.** Development toolchains only. Shells, `sudo`, `curl`/`wget`, `ssh`, registry and firewall tools are permanently blocked.
@@ -253,7 +253,7 @@ src/
   context.ts          per-request caller identity, so clients stay isolated
   logger.ts           structured logs + append-only audit trail
   auth/               OAuth 2.1 server, token store, the single request gate
-  security/           sandbox, secrets, capabilities, command policy
+  security/           path checks, secrets, capabilities, command policy
   workspace/          registry, project detection, instructions, project brief
   fs/                 file ops, search, glob, gitignore
   exec/               process runner (no shell, timeouts, smart truncation)
@@ -280,3 +280,7 @@ Found a way around one of the boundaries above? That is a vulnerability, not an 
 ---
 
 <sub>**Keywords:** MCP server · Model Context Protocol · ChatGPT MCP connector · ChatGPT coding agent · GPT-5.6 · GPT-5.6 Sol · GPT-5.6 Luna · AI coding assistant · autonomous coding agent · Claude Code alternative · Codex alternative · Cursor alternative · self-hosted AI developer tools · OAuth 2.1 MCP authorization · MCP dynamic client registration · PKCE · agentic coding · AI pair programming · code generation · automated testing · git automation · GitHub pull request automation · developer tools · TypeScript · Node.js · no API key required</sub>
+
+## Reliability upgrade
+
+Explicit sessions, revision-protected writes, exact-path commits, reconnectable background Jobs, source validation evidence and read-only `repo-bridge doctor` are available. See [2.0 migration](docs/UPGRADING-2.0.md) before upgrading: mutations require explicit targets, overwrites require revisions, and commits require paths/HEAD. Build scripts execute with host privileges; command/path policy is not an OS sandbox.

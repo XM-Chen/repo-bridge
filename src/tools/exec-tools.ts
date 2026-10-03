@@ -6,19 +6,20 @@
  * model does not have to guess whether this repo uses `mvn test` or `./gradlew
  * test` or `pnpm vitest run`. That guess is where autonomous loops usually break.
  */
-import path from 'node:path';
+import { launchJob, jobResult } from '../runtime/jobs.js';
+import type { Job } from '../runtime/store.js';
 import { loadConfig } from '../config.js';
 import { BridgeError } from '../errors.js';
 import { audit } from '../logger.js';
-import { formatExecResult, spawnArgv, type ExecResult } from '../exec/runner.js';
+
 import { parseCommand } from '../security/commands.js';
 import { resolvePath } from '../security/paths.js';
 import { detectProject, type CommandSuggestion } from '../workspace/detect.js';
 import { registry, type Workspace } from '../workspace/registry.js';
-import { join, type ToolDef } from './types.js';
+import { type ToolDef } from './types.js';
 
 const workspaceParam = {
-  workspace: { type: 'string', description: 'Workspace alias. Defaults to the active workspace.' },
+  workspace: { type: 'string', description: 'Workspace alias or ID. Reads may use the active workspace; mutations/execution require workspace or session_id.' },
 };
 
 function commandPolicy() {
@@ -33,8 +34,8 @@ function commandPolicy() {
 async function execute(
   w: Workspace,
   commandLine: string,
-  opts: { cwd?: string; timeoutSeconds?: number; confirm?: boolean; label: string },
-): Promise<ExecResult> {
+  opts: { cwd?: string; timeoutSeconds?: number; confirm?: boolean; label: string; wait?: number; key?: string; kind?: Job['kind']; target?: string },
+): Promise<Job> {
   const cfg = loadConfig();
   const parsed = parseCommand(commandLine, commandPolicy());
 
@@ -53,44 +54,7 @@ async function execute(
     ? Math.min(Math.max(1, opts.timeoutSeconds) * 1000, cfg.exec.timeoutMs)
     : cfg.exec.timeoutMs;
 
-  const result = await spawnArgv(parsed.argv, {
-    cwd,
-    timeoutMs,
-    maxOutputBytes: cfg.exec.maxOutputBytes,
-  });
-
-  registry().recordCommand(w.id, {
-    command: result.command,
-    cwd: path.relative(w.root, cwd).split(path.sep).join('/') || '.',
-    exitCode: result.exitCode,
-    durationMs: result.durationMs,
-    at: new Date().toISOString(),
-  });
-  audit({
-    action: opts.label,
-    workspace: w.alias,
-    command: result.command,
-    outcome: result.ok ? 'ok' : 'error',
-    durationMs: result.durationMs,
-    detail: { exitCode: result.exitCode, timedOut: result.timedOut },
-  });
-
-  return result;
-}
-
-/** Lines that name a failing test or a compile error — pulled to the top of the report. */
-const FAILURE_LINE =
-  /(FAILED|FAIL\s|✗|×|\[ERROR\]|error:|error TS\d+|AssertionError|Tests run:.*Failures: [1-9]|Tests:.*failed|assertion failed|BUILD FAILURE|panic:|FAILURES!)/i;
-
-function failureSummary(result: ExecResult, cap = 25): string {
-  if (result.ok) return '';
-  const lines = `${result.stdout}\n${result.stderr}`.split('\n');
-  const hits = lines
-    .map((l) => l.trimEnd())
-    .filter((l) => l.trim() && FAILURE_LINE.test(l))
-    .slice(0, cap);
-  if (hits.length === 0) return '';
-  return `FAILURE LINES (extracted)\n${hits.map((h) => '  ' + h).join('\n')}`;
+  return launchJob(w, parsed.argv, {cwd,timeoutMs,maxOutputBytes:cfg.exec.maxOutputBytes}, {wait:opts.wait,key:opts.key,kind:opts.kind,target:opts.target,signature:{label:opts.label,confirm:opts.confirm??false}});
 }
 
 function pickCommand(w: Workspace, kind: 'build' | 'test' | 'lint' | 'typecheck' | 'install'): CommandSuggestion {
@@ -143,17 +107,10 @@ function presetTool(
       const result = await execute(w, commandLine, {
         cwd,
         ...(args.optNum('timeout_seconds') !== undefined ? { timeoutSeconds: args.num('timeout_seconds', 0) } : {}),
-        label: name,
+        label: name, kind, target, wait: args.num('wait_seconds',5), key: args.optStr('idempotency_key'),
       });
 
-      return join(
-        explicit ? '' : `resolved from: ${preset!.source}`,
-        formatExecResult(result),
-        failureSummary(result),
-        !result.ok && kind === 'test'
-          ? 'Next: read the failure lines above, use search_code/read_file to find the responsible code, apply edit_file, then run_tests again.'
-          : '',
-      );
+      return jobResult(result);
     },
   };
 }
@@ -185,9 +142,9 @@ export const execTools: ToolDef[] = [
         ...(args.optStr('path') !== undefined ? { cwd: args.str('path') } : {}),
         ...(args.optNum('timeout_seconds') !== undefined ? { timeoutSeconds: args.num('timeout_seconds', 0) } : {}),
         confirm: args.bool('confirm', false),
-        label: 'run_command',
+        label: 'run_command', wait: args.num('wait_seconds',5), key: args.optStr('idempotency_key'),
       });
-      return join(formatExecResult(result), failureSummary(result));
+      return jobResult(result);
     },
   },
 

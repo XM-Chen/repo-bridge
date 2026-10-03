@@ -1,73 +1,43 @@
-/**
- * Cross-process file lock.
- *
- * Two bridge processes can legitimately share one data directory — a stdio
- * instance for a local editor and an HTTP instance for ChatGPT, say. Each keeps
- * its own in-memory copy of the state file, so without a lock the second one to
- * write silently discards whatever the first recorded.
- *
- * `mkdir` is the primitive: it is atomic on every platform we support and needs
- * no extra dependency. A lock older than the stale timeout is assumed to belong
- * to a crashed process and is broken, so a hard kill cannot wedge the bridge
- * permanently.
- */
+/** Same-host, local-filesystem locks. Never execute a transaction without a lock. */
 import fs from 'node:fs';
 import path from 'node:path';
-
-const STALE_AFTER_MS = 15_000;
-const RETRY_INTERVAL_MS = 25;
-const ACQUIRE_TIMEOUT_MS = 10_000;
-
-/** Synchronous sleep — these code paths are sync, and the waits are milliseconds. */
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+import crypto from 'node:crypto';
+import { BridgeError } from '../errors.js';
+export function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return (e as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
-
-function breakIfStale(lockDir: string): void {
-  try {
-    const age = Date.now() - fs.statSync(lockDir).mtimeMs;
-    if (age > STALE_AFTER_MS) fs.rmSync(lockDir, { recursive: true, force: true });
-  } catch {
-    /* it vanished on its own — fine */
-  }
-}
-
-/**
- * Run `fn` while holding an exclusive lock on `target`.
- *
- * If the lock cannot be taken within the timeout the callback runs anyway: the
- * bridge staying usable matters more than a write that is theoretically ordered,
- * and the alternative — failing a tool call because another process is slow — is
- * worse for the person waiting on it.
- */
-export function withFileLock<T>(target: string, fn: () => T): T {
-  const lockDir = `${target}.lock`;
-  fs.mkdirSync(path.dirname(lockDir), { recursive: true });
-
-  let held = false;
-  const deadline = Date.now() + ACQUIRE_TIMEOUT_MS;
-
-  while (Date.now() < deadline) {
+export function withFileLock<T>(target: string, fn: () => T, timeoutMs = 10_000): T {
+  const dir = `${target}.lock`;
+  const owner = crypto.randomUUID();
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
     try {
-      fs.mkdirSync(lockDir);
-      held = true;
+      fs.mkdirSync(dir);
+      try { fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ pid: process.pid, owner })); }
+      catch (e) { fs.rmSync(dir, { recursive: true, force: true }); throw e; }
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      breakIfStale(lockDir);
-      sleepSync(RETRY_INTERVAL_MS);
+      const reaper=dir+'.reap';let reaping=false;
+      try {
+        fs.mkdirSync(reaper);reaping=true;
+        const file = path.join(dir, 'owner.json');
+        if (fs.existsSync(file)) {
+          const record = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid: number };
+          if (Number.isInteger(record.pid) && record.pid > 0 && !processAlive(record.pid)) fs.rmSync(dir, { recursive: true, force: true });
+        } else if (Date.now() - fs.statSync(dir).mtimeMs > 15_000) fs.rmSync(dir, { recursive: true, force: true });
+      } catch { /* Unknown ownership: fail closed. */ }
+      finally {if(reaping)fs.rmSync(reaper,{recursive:true,force:true});}
+
+      if (Date.now() >= deadline) throw new BridgeError('LOCK_TIMEOUT', `Timed out locking ${target}; no changes were written.`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
-
-  try {
-    return fn();
-  } finally {
-    if (held) {
-      try {
-        fs.rmSync(lockDir, { recursive: true, force: true });
-      } catch {
-        /* best effort; a leftover lock goes stale and is broken later */
-      }
-    }
+  try { return fn(); }
+  finally {
+    const record = JSON.parse(fs.readFileSync(path.join(dir, 'owner.json'), 'utf8')) as { owner: string };
+    if (record.owner === owner) fs.rmSync(dir, { recursive: true, force: true });
   }
 }

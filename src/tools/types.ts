@@ -1,7 +1,7 @@
 /**
  * Tool contract + argument access.
  *
- * Tools return plain text, not JSON blobs: the consumer is a language model, and
+ * Tools preserve labelled text alongside a structured data result: the consumer is a language model, and
  * a compact labelled block costs fewer tokens and reads more reliably than
  * pretty-printed JSON. Structured detail is included where it matters (paths,
  * line numbers, exit codes) and omitted where it does not.
@@ -24,7 +24,7 @@ export interface ToolDef {
   capability: Capability;
   /** Set for tools whose effects are hard to undo; used for audit emphasis. */
   sideEffecting?: boolean;
-  handler: (args: Args) => Promise<string>;
+  handler: (args: Args) => Promise<string | { text: string; data: Record<string, unknown> | object }>;
 }
 
 export class Args {

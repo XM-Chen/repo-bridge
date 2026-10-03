@@ -40,7 +40,7 @@ const DEFAULT_ALLOWED = new Set([
 
 /**
  * Never runnable, at any permission level, with any confirmation. These either
- * escape the sandbox, damage the host, or have nothing to do with coding.
+ * affect the host, damage the host, or have nothing to do with coding.
  */
 const HARD_BLOCKED = new Set([
   'sudo', 'doas', 'su', 'runas',
@@ -242,6 +242,7 @@ export interface CommandPolicy {
  */
 export function parseCommand(input: string, policy: CommandPolicy): ParsedCommand {
   const trimmed = input.trim();
+  if (Buffer.byteLength(trimmed)>16384)throw new BridgeError('TOO_LARGE','Command exceeds 16 KiB. Use a checked-in script.');
   if (!trimmed) throw new BridgeError('INVALID_ARGUMENT', 'command is empty');
 
   const argv = tokenize(trimmed, policy.allowShell);
@@ -290,7 +291,7 @@ export function parseCommand(input: string, policy: CommandPolicy): ParsedComman
   const rule = DESTRUCTIVE_RULES.find((r) => r.match(normalised));
 
   return {
-    argv,
+    argv: bin==='git'?validateGitRead(argv):argv,
     bin,
     ...(rule ? { destructive: { id: rule.id, reason: rule.reason, ...(rule.safer ? { safer: rule.safer } : {}) } } : {}),
   };
@@ -310,4 +311,26 @@ export function matchesBranchPattern(branch: string, pattern: string): boolean {
     '^' + pattern.split('*').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$',
   );
   return re.test(branch);
+}
+/** Deliberately narrow Git read grammar. Unknown flags fail closed. */
+export function validateGitRead(argv: string[]): string[] {
+  const sub=argv[1] ?? '';
+  const tools:Record<string,string>={commit:'git_commit',add:'git_commit',push:'git_push',fetch:'git_sync',pull:'git_sync',checkout:'git_branch',switch:'git_branch',restore:'git_restore',reset:'git_restore'};
+  const reject=():never=>{throw new BridgeError('COMMAND_BLOCKED', `Generic Git operation is not supported: ${argv.slice(1).join(' ')}`,{hint:tools[sub??'']?`Use ${tools[sub!]} with explicit workspace/session_id. Other Git mutations must be run by the user in a terminal.`:'Use git_status, git_diff, git_log or git_branch; unsupported operations must be run in a terminal.'});};
+  const grammar:Record<string,RegExp>={
+    status:/^(--short|-s|--branch|-b|--porcelain(?:=v[12])?|--untracked-files=(all|normal|no)|--ignored|--ignore-submodules=(all|dirty|untracked|none)|-z)$/,
+    diff:/^(--stat|--numstat|--shortstat|--name-only|--name-status|--cached|--staged|--no-color|--color=never|--no-ext-diff|--no-textconv|--check|-U\d+|--unified=\d+|--binary|--summary|--diff-filter=[ACDMRTUXB*]+)$/,
+    log:/^(--oneline|--stat|--name-only|--name-status|--no-color|--color=never|--no-decorate|--decorate(?:=(short|full|auto|no))?|--all|--graph|--max-count=\d+|-\d+|--format=(oneline|short|medium|full|fuller|raw)|--no-ext-diff|--no-textconv)$/,
+    show:/^(--stat|--name-only|--name-status|--no-color|--color=never|--no-ext-diff|--no-textconv|--format=(oneline|short|medium|full|fuller|raw)|--summary)$/,
+    branch:/^(--list|--all|-a|--remotes|-r|--verbose|-v|-vv|--no-color|--color=never)$/,
+  };
+  if(!sub || !grammar[sub] || argv[0]!.includes('/') || argv[0]!.includes('\\'))reject();
+  let paths=false;
+  for(const arg of argv.slice(2)) {
+    if(arg==='--'){paths=true;continue;}
+    if(paths) {if(sub==='branch'||arg.startsWith(':(')||arg.includes('\0'))reject();continue;}
+    if(arg.startsWith('-')) {if(!grammar[sub]!.test(arg))reject();}
+    else {if(sub==='branch'||sub==='status'|| !/^[A-Za-z0-9_./:@~^{}+-]+$/.test(arg)||arg.startsWith(':'))reject();}
+  }
+  return ['git','--no-pager','--no-optional-locks','-c','core.fsmonitor=false','-c','diff.external=','-c','core.pager=cat',sub,...(sub==='diff'||sub==='show'||sub==='log'?['--no-ext-diff','--no-textconv']:[]),...argv.slice(2)];
 }

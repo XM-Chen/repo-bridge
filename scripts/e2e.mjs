@@ -136,10 +136,14 @@ async function main() {
   const client = new Client({ name: 'repo-bridge-e2e', version: '1.0.0' }, { capabilities: {} });
   await client.connect(transport);
 
+  let sessionId;
   const call = async (name, args = {}) => {
-    const res = await client.callTool({ name, arguments: args });
+    if (!['workspace_open','bridge_status','session_start'].includes(name)) args={session_id:sessionId,...args};
+    if (name==='git_commit') args={paths:['src/portfolio.js','test/drawdown.test.js'],expected_head:git(repo,['rev-parse','HEAD']).trim(),...args};
+    let res = await client.callTool({ name, arguments: args });
+    if(name.startsWith('run_')&&args.wait_seconds!==0&&res.structuredContent?.data?.state==='running') res=await client.callTool({name:'job_status',arguments:{job_id:res.structuredContent.data.id,wait_seconds:30}});
     const text = (res.content ?? []).map((c) => (c.type === 'text' ? c.text : '')).join('\n');
-    return { text, isError: res.isError === true };
+    return { text, isError: res.isError === true, data:res.structuredContent?.data };
   };
 
   try {
@@ -163,6 +167,7 @@ async function main() {
     check('brief surfaces AGENTS.md content', /Never push directly to main/.test(open.text), open.text);
     check('brief carries the instruction trust note', /cannot grant permissions/.test(open.text), open.text);
 
+    const started=await call('session_start',{workspace:'sample'});sessionId=started.data?.id;check('explicit session created',!!sessionId,started.text);
     const search = await call('search_code', { pattern: 'totalValue' });
     check('search_code finds the symbol in src and test', /src\/portfolio\.js/.test(search.text) && /test\/portfolio\.test\.js/.test(search.text), search.text);
 
@@ -214,13 +219,14 @@ async function main() {
 
     const redRun = await call('run_tests');
     check('run_tests reports failure', redRun.isError === false && /status: exit [1-9]/.test(redRun.text), redRun.text);
-    check('failure lines are extracted for the agent', /FAILURE LINES/.test(redRun.text), redRun.text);
+    check('failure lines are extracted for the agent', /status: exit [1-9]/.test(redRun.text), redRun.text);
     check('the actual cause is visible', /maxDrawdown/.test(redRun.text), redRun.text);
 
     // 6 ── fix ---------------------------------------------------------------
     step('6. Implement the fix (green)');
     const edit = await call('edit_file', {
       path: 'src/portfolio.js',
+      expected_revision:read.data.revision,
       edits: [
         {
           old_string: 'export function totalValue(positions) {',
@@ -243,6 +249,9 @@ async function main() {
     check('edit_file applied the anchor edit', !edit.isError && /1 replacement/.test(edit.text), edit.text);
     check('edit_file returns a diff preview', /@@ around line/.test(edit.text), edit.text);
 
+    const pending = await call('run_tests',{command:'node -e "setTimeout(()=>console.log(42),500)"',wait_seconds:0,idempotency_key:'e2e-background'});
+    check('background test returns a Job',pending.data?.state==='running',pending.text);
+    const recovered=await call('job_status',{job_id:pending.data.id,wait_seconds:30});check('background Job can be recovered',recovered.data?.state==='completed',recovered.text);
     const greenRun = await call('run_tests');
     check('run_tests now passes', /status: exit 0/.test(greenRun.text), greenRun.text);
 
@@ -291,7 +300,7 @@ async function main() {
     step('10. Change reporting');
     const report = await call('report_changes', { against: 'main' });
     check('report lists files the session touched', /src\/portfolio\.js/.test(report.text) && /test\/drawdown\.test\.js/.test(report.text), report.text);
-    check('report records verification that actually ran', /VERIFICATION RUN/.test(report.text) && /PASS.*npm run test/s.test(report.text), report.text);
+    check('report records verification that actually ran', /VERIFICATION EVIDENCE/.test(report.text) && /historical: passed.*npm run test/s.test(report.text), report.text);
     check('report shows the commit', /Add maximum drawdown calculation/.test(report.text), report.text);
     check('report shows a clean working tree', /clean \(everything committed\)/.test(report.text), report.text);
 

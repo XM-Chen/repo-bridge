@@ -15,6 +15,7 @@ import { loadConfig, type Config } from '../config.js';
 import { currentPrincipal } from '../context.js';
 import { BridgeError } from '../errors.js';
 import { atomicWriteFileSync } from '../fs/atomic.js';
+import { readState, transact } from '../fs/state.js';
 import { withFileLock } from '../fs/lock.js';
 import { isInside, realpathTolerant } from '../security/paths.js';
 
@@ -110,7 +111,7 @@ export class WorkspaceRegistry {
       const raw = fs.readFileSync(this.stateFile, 'utf8');
       const parsed = JSON.parse(raw) as PersistedState | PersistedStateV1;
 
-      if (Array.isArray(parsed.workspaces)) {
+      if ([1,2].includes(parsed.version) && Array.isArray(parsed.workspaces) && parsed.workspaces.every(w=>w&&typeof w.id==='string'&&typeof w.alias==='string'&&typeof w.root==='string'&&typeof w.lastUsedAt==='string'&&['local','managed'].includes(w.kind))) {
         // v1 tracked a single global active workspace. Preserve the registered
         // workspaces across the upgrade; the active selection is per-caller now
         // and is re-established by the next workspace_open.
@@ -126,9 +127,10 @@ export class WorkspaceRegistry {
         }
         return state;
       }
-    } catch {
-      /* first run, or corrupt state — start clean */
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new BridgeError('STATE_CORRUPT', `Cannot read ${this.stateFile}; original preserved: ${(e as Error).message}`);
     }
+    if (fs.existsSync(this.stateFile)) throw new BridgeError('STATE_CORRUPT', `Invalid state: ${this.stateFile}`);
     return { version: 2, activeByPrincipal: {}, workspaces: [] };
   }
 
@@ -190,15 +192,18 @@ export class WorkspaceRegistry {
   // ── workspace lifecycle ────────────────────────────────────────────────────
 
   list(): Workspace[] {
+    this.state = this.load();
     return [...this.state.workspaces].sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt));
   }
 
   get(idOrAlias: string): Workspace | undefined {
+    this.state = this.load();
     return this.state.workspaces.find((w) => w.id === idOrAlias || w.alias === idOrAlias);
   }
 
   /** The workspace this caller most recently opened. */
   active(principal: string = currentPrincipal()): Workspace | null {
+    this.state = this.load();
     const id = this.state.activeByPrincipal[principal];
     if (!id) return null;
     return this.state.workspaces.find((w) => w.id === id) ?? null;
@@ -213,6 +218,7 @@ export class WorkspaceRegistry {
           hint: `Open workspaces: ${this.list().map((w) => w.alias).join(', ') || '(none)'}. Use workspace_open first.`,
         });
       }
+      this.assertAllowedRoot(found.root);
       return found;
     }
     const act = this.active(principal);
@@ -223,6 +229,7 @@ export class WorkspaceRegistry {
           `Configured roots: ${this.configuredRoots().map((r) => r.alias).join(', ') || '(none)'}`,
       });
     }
+    this.assertAllowedRoot(act.root);
     return act;
   }
 
@@ -303,7 +310,7 @@ export class WorkspaceRegistry {
 
   setActive(idOrAlias: string, principal: string = currentPrincipal()): Workspace {
     return this.mutate(() => {
-      const ws = this.get(idOrAlias);
+      const ws = this.state.workspaces.find((w) => w.id === idOrAlias || w.alias === idOrAlias);
       if (!ws) throw new BridgeError('WORKSPACE_NOT_FOUND', `No workspace named "${idOrAlias}".`);
       ws.lastUsedAt = new Date().toISOString();
       this.state.activeByPrincipal[principal] = ws.id;
@@ -338,11 +345,7 @@ export class WorkspaceRegistry {
       }
     });
     this.logs.delete(ws.id);
-    try {
-      fs.rmSync(this.sessionFile(ws.id), { force: true });
-    } catch {
-      /* ignore */
-    }
+    // Preserve legacy history after close.
     return { alias: ws.alias, deleted };
   }
 
@@ -372,29 +375,14 @@ export class WorkspaceRegistry {
   }
 
   changeLog(id: string): ChangeLog {
-    let logEntry = this.logs.get(id);
-    if (logEntry) return logEntry;
-    try {
-      logEntry = JSON.parse(fs.readFileSync(this.sessionFile(id), 'utf8')) as ChangeLog;
-    } catch {
-      logEntry = { startedAt: new Date().toISOString(), files: {}, commands: [], git: [], notes: [] };
-    }
-    this.logs.set(id, logEntry);
-    return logEntry;
+    return readState(this.sessionFile(id), () => ({ startedAt: new Date().toISOString(), files: {}, commands: [], git: [], notes: [] }), e=>!!e && !!e.files && Array.isArray(e.commands) && Array.isArray(e.git) && Array.isArray(e.notes));
   }
-
-  private persistLog(id: string): void {
-    const entry = this.logs.get(id);
-    if (!entry) return;
-    try {
-      fs.writeFileSync(this.sessionFile(id), JSON.stringify(entry, null, 2), 'utf8');
-    } catch {
-      /* logging must never break a tool call */
-    }
+  private mutateLog(id: string, fn: (entry: ChangeLog)=>void): void {
+    transact(this.sessionFile(id), () => ({ startedAt: new Date().toISOString(), files: {}, commands: [], git: [], notes: [] } as ChangeLog), e=>!!e && !!e.files && Array.isArray(e.commands) && Array.isArray(e.git) && Array.isArray(e.notes), fn);
   }
 
   recordFile(id: string, relPath: string, action: FileChange['action']): void {
-    const entry = this.changeLog(id);
+    this.mutateLog(id, entry => {
     const prev = entry.files[relPath];
     entry.files[relPath] = {
       // A file created then modified stays "created" — that is what the diff shows.
@@ -402,27 +390,27 @@ export class WorkspaceRegistry {
       count: (prev?.count ?? 0) + 1,
       lastAt: new Date().toISOString(),
     };
-    this.persistLog(id);
+    });
   }
 
   recordCommand(id: string, rec: CommandRecord): void {
-    const entry = this.changeLog(id);
+    this.mutateLog(id, entry => {
     entry.commands.push(rec);
     if (entry.commands.length > MAX_COMMAND_HISTORY) entry.commands.splice(0, entry.commands.length - MAX_COMMAND_HISTORY);
-    this.persistLog(id);
+    });
   }
 
   recordGit(id: string, op: string, detail: string): void {
-    const entry = this.changeLog(id);
+    this.mutateLog(id, entry => {
     entry.git.push({ op, detail, at: new Date().toISOString() });
     if (entry.git.length > MAX_GIT_HISTORY) entry.git.splice(0, entry.git.length - MAX_GIT_HISTORY);
-    this.persistLog(id);
+    });
   }
 
   recordNote(id: string, note: string): void {
-    const entry = this.changeLog(id);
+    this.mutateLog(id, entry => {
     entry.notes.push(note);
-    this.persistLog(id);
+    });
   }
 }
 

@@ -10,7 +10,10 @@
  */
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { runCli } from './cli.js';
-import { loadConfig } from './config.js';
+import { runDoctor } from './doctor.js';
+import { transaction } from './runtime/store.js';
+import { shutdownJobs } from './runtime/jobs.js';
+import { loadConfig, initializeDirectories } from './config.js';
 import { closeLogger, configureLogger, log } from './logger.js';
 import { configureSecretPatterns, registerLiteralSecret } from './security/secrets.js';
 import { createMcpServer } from './server/mcp.js';
@@ -27,6 +30,7 @@ function parseMode(cfgMode: string): 'stdio' | 'http' | 'both' {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === 'doctor') process.exit(await runDoctor(process.argv.slice(3)));
   // --help, --version and the operator commands never start a server.
   try {
     const cli = runCli(process.argv.slice(2));
@@ -45,6 +49,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
+  initializeDirectories(cfg);
   configureLogger({ level: cfg.log.level, file: cfg.log.file, dataDir: cfg.dataDir });
   configureSecretPatterns(cfg.extraSecretPatterns);
   registerLiteralSecret(cfg.auth.token);
@@ -53,6 +58,7 @@ async function main(): Promise<void> {
 
   const mode = parseMode(cfg.mode);
   const reg = registry();
+  transaction(()=>undefined);
 
   log.info('repo-bridge starting', {
     mode,
@@ -70,9 +76,7 @@ async function main(): Promise<void> {
     });
   }
 
-  if (mode === 'http' || mode === 'both') {
-    startHttpServer();
-  }
+  const httpServer = mode === 'http' || mode === 'both' ? startHttpServer() : undefined;
 
   if (mode === 'stdio' || mode === 'both') {
     const server = createMcpServer();
@@ -80,13 +84,18 @@ async function main(): Promise<void> {
     log.info('stdio transport connected');
   }
 
-  const shutdown = (signal: string) => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if(shuttingDown)return;shuttingDown=true;
+    httpServer?.close();
     log.info('shutting down', { signal });
+    await shutdownJobs();
     closeLogger();
     process.exit(0);
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.stdin.on('end', () => {if(mode==='stdio')void shutdown('stdio EOF');});
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('uncaughtException', (err) => {
     log.error('uncaught exception', { error: err.message, stack: err.stack });
   });

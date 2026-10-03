@@ -18,6 +18,7 @@ export interface RequestContext {
    * `local:stdio`. Never token material — this ends up in logs.
    */
   principal: string;
+  session?: string;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();
@@ -32,3 +33,5 @@ export function runWithContext<T>(context: RequestContext, fn: () => T): T {
 export function currentPrincipal(): string {
   return storage.getStore()?.principal ?? STDIO_PRINCIPAL;
 }
+
+export function currentSession(): string | undefined { return storage.getStore()?.session; }

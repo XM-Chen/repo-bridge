@@ -1,3 +1,4 @@
+import { gitWritePolicy } from '../git/commit.js';
 /**
  * Pull / merge request creation — the one outward-facing write in the bridge.
  */
@@ -29,7 +30,7 @@ export const forgeTools: ToolDef[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        workspace: { type: 'string', description: 'Workspace alias. Defaults to the active workspace.' },
+        workspace: { type: 'string', description: 'Workspace alias or ID. Reads may use the active workspace; mutations/execution require workspace or session_id.' },
         title: { type: 'string', description: 'Pull request title.' },
         body: {
           type: 'string',
@@ -68,6 +69,7 @@ export const forgeTools: ToolDef[] = [
       }
 
       if (args.bool('push', true)) {
+        gitWritePolicy(true,head);
         const push = await git(w.root, ['push', '--set-upstream', 'origin', head], {
           allowFail: true,
           config: authConfig(url),

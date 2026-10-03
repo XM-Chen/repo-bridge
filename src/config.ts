@@ -304,11 +304,14 @@ export function loadConfig(): Config {
     extraSecretPatterns: envList('REPO_BRIDGE_SECRET_PATTERNS'),
   };
 
-  fs.mkdirSync(cfg.dataDir, { recursive: true });
-  fs.mkdirSync(cfg.managedRoot, { recursive: true });
-
   cached = cfg;
   return cfg;
+}
+
+/** Startup only; parsing configuration is deliberately read-only. */
+export function initializeDirectories(cfg: Config = loadConfig()): void {
+  fs.mkdirSync(cfg.dataDir, { recursive: true });
+  fs.mkdirSync(cfg.managedRoot, { recursive: true });
 }
 
 /** True when the active permission level is >= `required`. */

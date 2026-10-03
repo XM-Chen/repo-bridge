@@ -6,12 +6,12 @@
  *     pushes, so the default path is always "work on a feature branch"
  *   - operations that can lose the user's uncommitted work require confirm=true
  */
-import { loadConfig } from '../config.js';
+import { resolvePath } from '../security/paths.js';
+import { exactCommit, gitWritePolicy } from '../git/commit.js';
 import { BridgeError } from '../errors.js';
 import { audit } from '../logger.js';
 import {
   assertGitRepo,
-  assertNotProtected,
   authConfig,
   currentBranch,
   defaultBranch,
@@ -26,7 +26,7 @@ import { registry, type Workspace } from '../workspace/registry.js';
 import { block, bullets, join, kv, type Args, type ToolDef } from './types.js';
 
 const workspaceParam = {
-  workspace: { type: 'string', description: 'Workspace alias. Defaults to the active workspace.' },
+  workspace: { type: 'string', description: 'Workspace alias or ID. Reads may use the active workspace; mutations/execution require workspace or session_id.' },
 };
 
 async function repo(args: Args): Promise<Workspace> {
@@ -45,8 +45,10 @@ export const gitTools: ToolDef[] = [
     handler: async (args) => {
       const w = await repo(args);
       const status = await getStatus(w.root);
-      return block('GIT STATUS', [
+      const head=(await git(w.root,['rev-parse','HEAD'],{allowFail:true})).stdout.trim();
+      return {data:{...status,head},text:block('GIT STATUS', [
         ...kv({
+          head,
           branch: `${status.branch}${isProtectedBranch(status.branch) ? ' [PROTECTED]' : ''}`,
           upstream: status.upstream,
           ahead: status.ahead || undefined,
@@ -57,7 +59,7 @@ export const gitTools: ToolDef[] = [
         ...(status.staged.length ? ['staged:', ...bullets(status.staged.map((f) => `${f.staged} ${f.path}${f.originalPath ? ` (was ${f.originalPath})` : ''}`)).map((b) => '  ' + b)] : []),
         ...(status.unstaged.length ? ['unstaged:', ...bullets(status.unstaged.map((f) => `${f.worktree} ${f.path}`)).map((b) => '  ' + b)] : []),
         ...(status.untracked.length ? ['untracked:', ...bullets(status.untracked).map((b) => '  ' + b)] : []),
-      ]);
+      ]) };
     },
   },
 
@@ -95,7 +97,7 @@ export const gitTools: ToolDef[] = [
       } else {
         diffArgs.push(`${against}...HEAD`);
       }
-      if (paths.length) diffArgs.push('--', ...paths);
+      if (paths.length) diffArgs.push('--', ...paths.map(p=>`:(literal)${resolvePath(w.root,p).rel}`));
 
       const res = await git(w.root, diffArgs, { allowFail: true });
       if (!res.ok && res.stderr.trim()) {
@@ -169,6 +171,7 @@ export const gitTools: ToolDef[] = [
         );
       }
 
+      gitWritePolicy();
       const create = args.bool('create', false);
       const from = args.optStr('from');
 
@@ -197,7 +200,7 @@ export const gitTools: ToolDef[] = [
   {
     name: 'git_commit',
     description:
-      'Stage and commit changes. By default every modified and untracked file is staged; pass `paths` to commit a subset. Refuses to commit on a protected branch — create a feature branch first. Write the message in the style of the repository\'s recent commits (check git_log).',
+      'Commit only explicit paths against expected_head using a temporary index; preserve unrelated staging. Refuses to commit on a protected branch — create a feature branch first. Write the message in the style of the repository\'s recent commits (check git_log).',
     capability: 'git_local',
     sideEffecting: true,
     inputSchema: {
@@ -205,55 +208,16 @@ export const gitTools: ToolDef[] = [
       properties: {
         ...workspaceParam,
         message: { type: 'string', description: 'Commit message. First line is the subject; add a body after a blank line.' },
-        paths: { type: 'array', items: { type: 'string' }, description: 'Only stage and commit these paths. Default: all changes.' },
+        paths: { type: 'array', minItems:1, items: { type: 'string' }, description: 'Explicit individual files to commit.' },
+        expected_head: {type:'string',description:'Full HEAD from git_status.'},
       },
-      required: ['message'],
+      required: ['message','paths','expected_head'],
     },
     handler: async (args) => {
-      const cfg = loadConfig();
-      const w = await repo(args);
-      const branch = await currentBranch(w.root);
-      assertNotProtected(branch, 'commit');
-
-      const message = args.str('message');
-      const paths = args.strArray('paths');
-
-      const before = await getStatus(w.root);
-      if (before.clean) return 'Nothing to commit — the working tree is clean.';
-      if (before.conflicted.length) {
-        throw new BridgeError('GIT_ERROR', `Unresolved merge conflicts in: ${before.conflicted.join(', ')}`, {
-          hint: 'Resolve the conflicts with edit_file first, then commit.',
-        });
-      }
-
-      await git(w.root, paths.length ? ['add', '--', ...paths] : ['add', '-A']);
-
-      const staged = await getStatus(w.root);
-      if (staged.staged.length === 0) {
-        return 'Nothing staged — the requested paths have no changes.';
-      }
-
-      const fullMessage = cfg.git.commitTrailer ? `${message}\n\n${cfg.git.commitTrailer}` : message;
-      const res = await git(w.root, [
-        '-c', `user.name=${cfg.git.authorName}`,
-        '-c', `user.email=${cfg.git.authorEmail}`,
-        'commit', '-m', fullMessage,
-      ], { allowFail: true });
-
-      if (!res.ok) {
-        throw new BridgeError('GIT_ERROR', (res.stderr || res.stdout).trim().split('\n').slice(0, 5).join('\n'), {
-          hint: 'A commit hook may have rejected the change. Fix the reported problem and commit again.',
-        });
-      }
-
-      const head = (await gitLog(w.root, 1))[0];
-      registry().recordGit(w.id, 'commit', `${head?.shortHash ?? ''} ${message.split('\n')[0]}`);
-      audit({ action: 'git_commit', workspace: w.alias, target: branch, outcome: 'ok', detail: { files: staged.staged.length } });
-
-      return join(
-        `committed ${staged.staged.length} file(s) on ${branch} as ${head?.shortHash ?? '(unknown)'}`,
-        block('FILES', bullets(staged.staged.map((f) => `${f.staged} ${f.path}`), 40)),
-      );
+      const w=await repo(args);
+      const result=await exactCommit(w,args.strArray('paths'),args.str('expected_head'),args.str('message'));
+      try {registry().recordGit(w.id,'commit',result.commit_id);}catch(e){result.recovery=[result.recovery,`Commit published as ${result.commit_id}; history recording failed: ${(e as Error).message}. Do not repeat git_commit.`].filter(Boolean).join('\n');}
+      return {text:join(`committed ${result.paths.length} file(s) on ${result.branch} as ${result.commit_id}`,result.recovery),data:result};
     },
   },
 
@@ -279,7 +243,7 @@ export const gitTools: ToolDef[] = [
       const remoteName = args.str('remote', 'origin');
       const force = args.bool('force', false);
 
-      assertNotProtected(branch, 'push');
+      gitWritePolicy(true,branch);
       if (force && !args.bool('confirm', false)) {
         throw new BridgeError('DESTRUCTIVE_BLOCKED', 'Force-push rewrites remote history and needs confirm=true.', {
           hint: 'Prefer pushing a new branch. If the remote must be rewritten, tell the user first.',
@@ -331,6 +295,7 @@ export const gitTools: ToolDef[] = [
     },
     handler: async (args) => {
       const w = await repo(args);
+      gitWritePolicy(true);
       const mode = args.str('mode', 'fetch');
       const remoteName = args.str('remote', 'origin');
       const url = await originUrl(w.root);
@@ -362,7 +327,7 @@ export const gitTools: ToolDef[] = [
       registry().recordGit(w.id, 'pull', remoteName);
       if (!res.ok) {
         throw new BridgeError('GIT_ERROR', `Pull failed: ${(res.stderr || res.stdout).trim().split('\n').slice(0, 8).join('\n')}`, {
-          hint: 'If this is a rebase conflict, resolve the files with edit_file, then run `git rebase --continue` via run_command.',
+          hint: 'If this is a rebase conflict, resolve the files with edit_file, then ask the user to run `git rebase --continue` in a terminal.',
         });
       }
       return join(`pulled ${remoteName}`, (res.stdout || res.stderr).trim());
@@ -387,6 +352,7 @@ export const gitTools: ToolDef[] = [
     },
     handler: async (args) => {
       const w = await repo(args);
+      gitWritePolicy();
       const paths = args.strArray('paths');
       if (paths.length === 0) throw new BridgeError('INVALID_ARGUMENT', 'paths must list the files to restore.');
       if (!args.bool('confirm', false)) {
@@ -398,7 +364,8 @@ export const gitTools: ToolDef[] = [
       const foreign = paths.filter((p) => !(p in touched));
 
       const staged = args.bool('staged', false);
-      const res = await git(w.root, staged ? ['restore', '--staged', '--', ...paths] : ['restore', '--', ...paths], { allowFail: true });
+      const literal=paths.map(p=>`:(literal)${resolvePath(w.root,p).rel}`);
+      const res = await git(w.root, staged ? ['restore', '--staged', '--', ...literal] : ['restore', '--', ...literal], { allowFail: true });
       if (!res.ok) {
         throw new BridgeError('GIT_ERROR', (res.stderr || res.stdout).trim().split('\n')[0] ?? 'restore failed');
       }

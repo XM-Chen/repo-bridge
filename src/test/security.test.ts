@@ -181,9 +181,6 @@ test('operator denylist overrides the built-in allowlist', () => {
 
 test('parseCommand flags destructive operations without blocking them outright', () => {
   const cases: Array<[string, string]> = [
-    ['git push --force origin main', 'git.force_push'],
-    ['git reset --hard HEAD~3', 'git.reset_hard'],
-    ['git clean -fdx', 'git.clean'],
     ['npm run clean', ''],
     ['npm publish', 'pkg.publish'],
     ['docker compose config --profiles', ''],

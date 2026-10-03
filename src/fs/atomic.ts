@@ -12,6 +12,7 @@
  * the same path backs every file the bridge edits.
  */
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 
 const RETRY_DELAYS_MS = [5, 10, 20, 40, 80, 120, 160, 200];
@@ -31,7 +32,7 @@ export function atomicWriteFileSync(target: string, data: string, opts: AtomicWr
   fs.mkdirSync(dir, { recursive: true });
 
   // The temp name carries the pid so two processes never collide on it.
-  const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${Date.now()}.tmp`);
+  const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   fs.writeFileSync(tmp, data, opts.mode !== undefined ? { encoding: 'utf8', mode: opts.mode } : { encoding: 'utf8' });
 
   let lastError: unknown;

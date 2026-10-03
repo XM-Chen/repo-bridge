@@ -63,7 +63,7 @@ test('writeFile create refuses to clobber an existing file', () => {
 
 test('writeFile append adds to the end', () => {
   const root = fixture();
-  writeFile(root, 'src/index.ts', 'export const extra = 1;\n', 'append');
+  writeFile(root, 'src/index.ts', 'export const extra = 1;\n', 'append', readFile(root,'src/index.ts').revision);
   assert.match(fs.readFileSync(path.join(root, 'src', 'index.ts'), 'utf8'), /extra/);
 });
 

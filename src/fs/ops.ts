@@ -7,6 +7,12 @@
  * drifted — which is exactly when a blind overwrite would destroy work.
  */
 import fs from 'node:fs';
+import crypto from 'node:crypto';
+import { withFileLock } from './lock.js';
+export const revision = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
+function checkRevision(abs: string, expected: string | undefined, required = false): void {
+  if ((required && !expected) || (expected && revision(fs.readFileSync(abs)) !== expected)) throw new BridgeError('REVISION_CONFLICT', 'File version changed or expected_revision is missing.', { hint: 'Read the file again and provide its revision as expected_revision.' });
+}
 import path from 'node:path';
 import { BridgeError } from '../errors.js';
 import { ALWAYS_SKIP_DIRS, resolvePath } from '../security/paths.js';
@@ -80,6 +86,7 @@ export function listDir(
 }
 
 export interface ReadResult {
+  revision: string;
   path: string;
   content: string;
   totalLines: number;
@@ -136,6 +143,7 @@ export function readFile(
 
   return {
     path: rel,
+    revision: revision(buf),
     content,
     totalLines: total,
     startLine: start,
@@ -175,7 +183,9 @@ export interface WriteResult {
   lines: number;
 }
 
-export function writeFile(root: string, relPath: string, content: string, mode: WriteMode = 'create'): WriteResult {
+export function writeFile(root: string, relPath: string, content: string, mode: WriteMode = 'create', expectedRevision?: string): WriteResult {
+  const lockPath = resolvePath(root, relPath).abs;
+  return withFileLock(lockPath, () => {
   if (Buffer.byteLength(content, 'utf8') > MAX_WRITE_BYTES) {
     throw new BridgeError('TOO_LARGE', 'Refusing to write more than 8 MB in a single call.');
   }
@@ -191,7 +201,11 @@ export function writeFile(root: string, relPath: string, content: string, mode: 
     });
   }
 
-  const final = mode === 'append' && existed ? fs.readFileSync(abs, 'utf8') + content : content;
+  const source = existed ? fs.readFileSync(abs) : undefined;
+  if (source && (!expectedRevision || revision(source)!==expectedRevision)) throw new BridgeError('REVISION_CONFLICT','File version changed or expected_revision is missing.',{hint:'Read the file again and provide its revision.'});
+  const final = mode === 'append' && source ? source.toString('utf8') + content : content;
+  if (source && revision(fs.readFileSync(abs)) !== revision(source)) checkRevision(abs, revision(source));
+  if (!source && fs.existsSync(abs)) throw new BridgeError('REVISION_CONFLICT', 'Target was created concurrently; re-read it.');
   atomicWrite(abs, final);
 
   return {
@@ -200,6 +214,7 @@ export function writeFile(root: string, relPath: string, content: string, mode: 
     bytes: Buffer.byteLength(final, 'utf8'),
     lines: final.split('\n').length,
   };
+  });
 }
 
 export interface EditSpec {
@@ -244,11 +259,14 @@ function diagnoseMissingAnchor(content: string, anchor: string): string {
   return 'No part of the anchor was found. Re-read the file — it may have changed since you last read it.';
 }
 
-export function editFile(root: string, relPath: string, edits: EditSpec[]): EditResult {
+export function editFile(root: string, relPath: string, edits: EditSpec[], expectedRevision?: string): EditResult {
+  return withFileLock(resolvePath(root, relPath, { mustExist: true }).abs, () => {
   if (edits.length === 0) throw new BridgeError('INVALID_ARGUMENT', 'edits must not be empty');
 
   const { abs, rel } = resolvePath(root, relPath, { mustExist: true });
-  const original = fs.readFileSync(abs, 'utf8');
+  const originalBytes = fs.readFileSync(abs);
+  if(expectedRevision && revision(originalBytes)!==expectedRevision)throw new BridgeError('REVISION_CONFLICT','File version changed; read it again.');
+  const original = originalBytes.toString('utf8');
   let content = original;
   let replacements = 0;
 
@@ -278,6 +296,7 @@ export function editFile(root: string, relPath: string, edits: EditSpec[]): Edit
     replacements += edit.replaceAll ? occurrences : 1;
   }
 
+  checkRevision(abs, revision(originalBytes));
   atomicWrite(abs, content);
 
   return {
@@ -288,6 +307,7 @@ export function editFile(root: string, relPath: string, edits: EditSpec[]): Edit
     linesAfter: content.split('\n').length,
     preview: previewChange(original, content),
   };
+  });
 }
 
 /** Compact "first divergence" preview so the model can confirm the edit landed. */

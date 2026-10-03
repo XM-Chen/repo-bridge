@@ -6,6 +6,9 @@
  * summary a reviewer actually needs (what changed, what was verified, what is
  * still open) from recorded facts rather than from the model's recollection.
  */
+import { records, session } from '../runtime/store.js';
+import { fingerprint } from '../runtime/verification.js';
+import { currentPrincipal, currentSession } from '../context.js';
 import { loadConfig, describeLevel } from '../config.js';
 import { describeAuthMode } from '../auth/index.js';
 import { allowedCommands } from '../security/commands.js';
@@ -85,14 +88,19 @@ export const statusTools: ToolDef[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        workspace: { type: 'string', description: 'Workspace alias. Defaults to the active workspace.' },
+        workspace: { type: 'string', description: 'Workspace alias or ID. Reads may use the active workspace; mutations/execution require workspace or session_id.' },
         against: { type: 'string', description: 'Compare against this ref for the file summary (e.g. "develop"). Default: HEAD (uncommitted changes only).' },
       },
     },
     handler: async (args) => {
       const reg = registry();
       const w = reg.require(args.optStr('workspace'));
-      const changeLog = reg.changeLog(w.id);
+      const legacy=reg.changeLog(w.id);
+      const sid=currentSession();const state=records();
+      const ops=sid?session(sid).operations:state.operations[`${currentPrincipal()}:${w.id}`]??[];
+      const files: typeof legacy.files={};
+      for(const op of ops) for(const p of op.paths) files[p]={action:op.tool==='delete_path'?'deleted':op.tool==='move_path'?'moved':'modified',count:(files[p]?.count??0)+1,lastAt:op.at};
+      const changeLog={...legacy,files,...(sid?{startedAt:session(sid).startedAt}:{}),commands:[] as typeof legacy.commands,git:legacy.git};
       const against = args.optStr('against');
 
       let gitSection = '';
@@ -123,11 +131,18 @@ export const statusTools: ToolDef[] = [
         );
       }
 
-      const commands = changeLog.commands;
-      const verification = commands.filter((c) => /test|build|lint|verify|check/i.test(c.command));
+      const commands = legacy.commands;
+      const jobs=records().jobs.filter(j=>j.workspace===w.id && j.principal===currentPrincipal() && (!currentSession() || j.session===currentSession()));
+      const current=await fingerprint(w.root);
+      const verification=jobs.filter(j=>j.kind).map(j=>({
+        job_id:j.id,kind:j.kind,command:j.command,target:j.target??'full command scope',state:j.state,exit_code:j.result?.exitCode??null,
+        historical:j.state==='completed'&&j.result?.exitCode===0?'passed':j.state==='completed'?'failed':j.state,
+        current_code:j.state==='completed'&&j.result?.exitCode===0 && j.before?.complete && j.after?.complete && current.complete && j.before.digest===j.after.digest && j.after.digest===current.digest?'observed_match':'unproven',
+        started_at:j.startedAt,ended_at:j.endedAt,reason:current.reason??j.after?.reason??j.before?.reason
+      }));
 
-      return join(
-        block('SESSION', kv({
+      return {data:{verification,current_fingerprint:current,session_id:currentSession(),workspace:w.id},text:join(
+        block('OPERATION HISTORY', kv({
           workspace: w.alias,
           root: w.root,
           task: w.task,
@@ -135,17 +150,18 @@ export const statusTools: ToolDef[] = [
           files_touched_by_bridge: Object.keys(changeLog.files).length,
         })),
         Object.keys(changeLog.files).length
-          ? block('FILES TOUCHED BY THIS SESSION', bullets(Object.entries(changeLog.files).map(([p, c]) => `${c.action.padEnd(8)} ${p}${c.count > 1 ? ` (${c.count} edits)` : ''}`), 60))
+          ? block('FILES RECORDED FOR THIS TARGET', bullets(Object.entries(changeLog.files).map(([p, c]) => `${c.action.padEnd(8)} ${p}${c.count > 1 ? ` (${c.count} edits)` : ''}`), 60))
           : '',
         gitSection,
         verification.length
-          ? block('VERIFICATION RUN', bullets(verification.map((c) => `${c.exitCode === 0 ? 'PASS' : `FAIL(${c.exitCode})`}  ${c.command}  [${c.durationMs}ms]`), 20))
-          : block('VERIFICATION RUN', ['none — no build/test command was executed in this session']),
+          ? block('VERIFICATION EVIDENCE', bullets(verification.map(c=>`historical: ${c.historical}; current code: ${c.current_code} — ${c.kind} ${c.command} (exit ${c.exit_code})`), 20))
+          : block('VERIFICATION RUN', ['none — legacy commands are history only; no typed validation evidence']),
         commands.length
-          ? block('ALL COMMANDS', bullets(commands.slice(-20).map((c) => `${c.exitCode === 0 ? 'ok  ' : `exit ${c.exitCode}`} ${c.command}`), 20))
+          ? block('LEGACY WORKSPACE COMMAND HISTORY (no inferred session ownership)', bullets(commands.slice(-20).map((c) => `${c.exitCode === 0 ? 'ok  ' : `exit ${c.exitCode}`} ${c.command}`), 20))
           : '',
-        changeLog.git.length ? block('GIT OPERATIONS', bullets(changeLog.git.map((g) => `${g.op}: ${g.detail}`), 20)) : '',
-      );
+        changeLog.git.length ? block('LEGACY WORKSPACE GIT HISTORY (no inferred session ownership)', bullets(changeLog.git.map((g) => `${g.op}: ${g.detail}`), 20)) : '',
+        'observed_match compares recorded source observations only; it does not prove environment, dependencies or transient changes. Legacy workspace logs have no session owner.',
+      ) };
     },
   },
 ];

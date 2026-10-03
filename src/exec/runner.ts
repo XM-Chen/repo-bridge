@@ -22,6 +22,9 @@ export interface ExecOptions {
   env?: Record<string, string>;
   /** Fed to the process stdin, then closed. */
   input?: string;
+  signal?: AbortSignal;
+  onOutput?: (text: string) => void;
+  onSpawn?: () => void;
 }
 
 export interface ExecResult {
@@ -104,7 +107,7 @@ function winCmdLine(argv: string[]): string {
     .join(' ');
 }
 
-function killTree(pid: number, child: { kill: (sig?: NodeJS.Signals) => boolean }): void {
+export function killTree(pid: number, child: { kill: (sig?: NodeJS.Signals) => boolean }): void {
   if (isWin) {
     // Node's kill() only signals the direct child; npm/gradle wrappers spawn
     // grandchildren that would survive and keep holding file locks.
@@ -218,6 +221,11 @@ export function spawnArgv(argv: string[], opts: ExecOptions): Promise<ExecResult
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    child.once('spawn',()=>opts.onSpawn?.());
+    const abort = () => { if (child.pid) killTree(child.pid, child); };
+    opts.signal?.addEventListener('abort', abort, { once: true });
+    if (opts.signal?.aborted) abort();
+
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let stdoutBytes = 0;
@@ -228,18 +236,10 @@ export function spawnArgv(argv: string[], opts: ExecOptions): Promise<ExecResult
     let timedOut = false;
     let settled = false;
 
-    child.stdout.on('data', (c: Buffer) => {
-      if (stdoutBytes < hardCap) {
-        stdoutChunks.push(c);
-        stdoutBytes += c.length;
-      }
-    });
-    child.stderr.on('data', (c: Buffer) => {
-      if (stderrBytes < hardCap) {
-        stderrChunks.push(c);
-        stderrBytes += c.length;
-      }
-    });
+    const streamOut = new SafeOutput(text=> {opts.onOutput?.(text);const c=Buffer.from(text);if(stdoutBytes<hardCap)stdoutChunks.push(c.subarray(0,hardCap-stdoutBytes));stdoutBytes+=Math.min(c.length,hardCap);});
+    const streamErr = new SafeOutput(text=> {opts.onOutput?.(text);const c=Buffer.from(text);if(stderrBytes<hardCap)stderrChunks.push(c.subarray(0,hardCap-stderrBytes));stderrBytes+=Math.min(c.length,hardCap);});
+    child.stdout.on('data', (c: Buffer) => streamOut.push(c));
+    child.stderr.on('data', (c: Buffer) => streamErr.push(c));
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -255,6 +255,8 @@ export function spawnArgv(argv: string[], opts: ExecOptions): Promise<ExecResult
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', abort);
+      streamOut.end(); streamErr.end();
 
       const rawOut = redact(Buffer.concat(stdoutChunks).toString('utf8'));
       const rawErr = redact(Buffer.concat(stderrChunks).toString('utf8'));
@@ -262,7 +264,7 @@ export function spawnArgv(argv: string[], opts: ExecOptions): Promise<ExecResult
       const errT = smartTruncate(rawErr, Math.floor(opts.maxOutputBytes / 2));
 
       resolve({
-        command: display,
+        command: redact(display),
         cwd: opts.cwd,
         exitCode,
         signal,
@@ -270,7 +272,7 @@ export function spawnArgv(argv: string[], opts: ExecOptions): Promise<ExecResult
         stdout: outT.text,
         stderr: errT.text,
         timedOut,
-        truncated: outT.truncated || errT.truncated || stdoutBytes >= hardCap || stderrBytes >= hardCap,
+        truncated: streamOut.truncated || streamErr.truncated || outT.truncated || errT.truncated || stdoutBytes >= hardCap || stderrBytes >= hardCap,
         ok: !timedOut && exitCode === 0,
       });
     };
@@ -299,4 +301,38 @@ export function formatExecResult(r: ExecResult): string {
   if (r.stderr.trim()) parts.push(`--- stderr ---\n${r.stderr.trimEnd()}`);
   if (!r.stdout.trim() && !r.stderr.trim()) parts.push('(no output)');
   return parts.join('\n');
+}
+import { StringDecoder } from 'node:string_decoder';
+/** Hold complete credential/line units across data chunks; discard oversized units. */
+class SafeOutput {
+  truncated = false;
+  private decoder = new StringDecoder('utf8');
+  private pending = '';
+  private privateKey = false;
+  private dropped = false;
+  private secretContinuation = false;
+  constructor(private emit?: (text: string) => void) {}
+  push(buf: Buffer): void {
+    if (!this.emit) return;
+    const str = this.decoder.write(buf);
+    for (const part of str.split(/(?<=\n)/)) {
+      this.pending += part;
+      if (this.pending.length > 65536) { this.pending = ''; this.dropped = true;this.truncated=true; }
+      if (!part.endsWith('\n')) continue;
+      const line = this.pending; this.pending = '';
+      if (this.dropped) {this.emit('[REDACTED:oversized-output-unit]\n');this.dropped=false;continue;}
+      if (/-----BEGIN .*PRIVATE KEY-----/.test(line)) {this.privateKey=true;this.emit('[REDACTED:private-key]\n');}
+      if (this.privateKey) {if (/-----END .*PRIVATE KEY-----/.test(line)) this.privateKey=false;continue;}
+      if (this.secretContinuation) {this.emit('[REDACTED:credential-value]\n');this.secretContinuation=false;continue;}
+      if (/\b(?:[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY|API_KEY))\s*[:=]\s*["']?\s*$/i.test(line)) this.secretContinuation=true;
+      this.emit(redact(line));
+    }
+  }
+  end(): void {
+    if (!this.emit) return;
+    this.pending += this.decoder.end();
+    if (this.secretContinuation || this.privateKey || /-----BEGIN .*PRIVATE KEY/.test(this.pending) || this.dropped) this.emit('[REDACTED:incomplete-output-unit]\n');
+    else if (this.pending) this.emit(redact(this.pending));
+    this.pending='';
+  }
 }

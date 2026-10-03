@@ -1,8 +1,8 @@
 # Tool reference
 
-30 tools at `full` permission. The **Needs** column is the permission level required; tools above the configured level are not advertised to the model at all.
+39 tools at `full` permission. The **Needs** column is the permission level required; tools above the configured level are not advertised to the model at all.
 
-Every tool accepts an optional `workspace` argument (an alias from `workspace_list`). Omit it to use the active workspace — the one most recently opened.
+Workspace tools accept `workspace` or `session_id`. Reads may omit both; mutations and execution require an explicit target. Both selectors must match. Every MCP response includes the original text plus a structured envelope and output schema. See [2.0 migration](UPGRADING-2.0.md).
 
 ---
 
@@ -13,7 +13,7 @@ Every tool accepts an optional `workspace` argument (an alias from `workspace_li
 | `workspace_list` | read_only | Configured roots, open workspaces, which is active, remote-mode readiness |
 | `workspace_open` | read_only | Open a local repository and return the full project brief |
 | `workspace_info` | read_only | Current state without re-reading the repository — the resume tool |
-| `repo_open_remote` | read_only | Clone or refresh a remote repository into an isolated managed workspace |
+| `repo_open_remote` | full | Clone or refresh a remote repository into an isolated managed workspace |
 | `workspace_close` | read_only | Stop tracking a workspace; optionally delete a managed clone |
 
 ### `workspace_open`
@@ -59,10 +59,10 @@ Returns exact content by default so it can be copied verbatim into an `edit_file
 Returns `file:line` locations with matching lines and optional context. Honours `.gitignore`; skips build output, `node_modules`, and credential files. Uses ripgrep when available, otherwise an equivalent JavaScript walker.
 
 ### `write_file`
-`path` *(required)*, `content` *(required)*, `mode` — `create` (default, fails if the file exists), `overwrite`, `append`. Parent directories are created.
+`path` *(required)*, `content` *(required)*, `mode` — `create` (default, fails if the file exists), `overwrite`, `append`. Existing-file overwrite/append requires `expected_revision` from `read_file`. Parent directories are created. Revisions cover full file bytes even for partial reads.
 
 ### `edit_file`
-`path` *(required)*, `edits[]` *(required)* — each `{ old_string, new_string, replace_all? }`.
+`path` *(required)*, optional `expected_revision`, `edits[]` *(required)* — each `{ old_string, new_string, replace_all? }`. Bridge writes serialize and recheck source before publication, without full external-editor transaction isolation.
 
 Each `old_string` must match exactly once unless `replace_all` is set. Edits apply in order and **atomically**: if any anchor fails, the file is left untouched and the error explains why — whitespace mismatch, a stale first line, or nothing found. Returns a compact diff preview.
 
@@ -80,11 +80,11 @@ This is the preferred way to change code. It keeps token cost proportional to th
 | `run_lint` | develop | Lint using the command detected for this project |
 
 ### `run_command`
-`command` *(required)*, `path`, `timeout_seconds`, `confirm`
+`command` *(required)*, `path`, `timeout_seconds`, `confirm`, `wait_seconds` (0–30, default 5), `idempotency_key`
 
 Commands run **without a shell**: `;`, `&&`, `|`, `<`, `>`, backticks and `$( )` are rejected. Only allowlisted executables run. Destructive commands need `confirm=true`.
 
-Returns command, cwd, exit code, duration, stdout and stderr. Long output is truncated keeping head, tail, and error-matching lines.
+Returns a Job plus command results when finished during the wait; otherwise returns job_id. Use job_status/job_log after reconnecting. Generic Git supports only validated status/diff/log/show/branch-list reads. Build scripts and interpreters are trusted host code, not an OS sandbox.
 
 ### `run_build` / `run_tests` / `run_lint`
 `command` (override), `target` (appended — e.g. `-Dtest=PortfolioRiskServiceTest`), `path` (module), `timeout_seconds`
@@ -114,9 +114,9 @@ On failure, `run_tests` extracts the failure lines and states the next step, whi
 Untracked files are listed separately, since they never appear in a diff.
 
 ### `git_commit`
-`message` *(required)*, `paths[]`
+`message`, nonempty individual `paths[]`, `expected_head` *(all required)*
 
-Stages everything by default. Refused on a protected branch, and refused with unresolved conflicts. Reports the short hash and the files committed.
+Commits only selected files using a temporary index based on expected_head from git_status. Preserves unrelated staging and refuses selected partially staged files. Hooks may edit messages; file/tree changes stop publication. Conditional HEAD update prevents overwriting competing commits. Returns commit_id and recovery instructions for post-publication failures; do not repeat an already published commit.
 
 ### `git_push`
 `branch` (default: current), `remote` (default `origin`), `force`, `confirm`
@@ -162,7 +162,7 @@ Errors are returned as text beginning with the code, followed by an actionable h
 | Code | Meaning |
 |---|---|
 | `NO_WORKSPACE` / `WORKSPACE_NOT_FOUND` | Open a workspace first, or the alias is wrong |
-| `PATH_OUTSIDE_WORKSPACE` | Path escaped the sandbox |
+| `PATH_OUTSIDE_WORKSPACE` | Path escaped file-tool containment |
 | `PATH_NOT_FOUND` | No such file |
 | `SECRET_BLOCKED` | Credential file — never returned |
 | `PERMISSION_DENIED` | Above the configured permission level |
@@ -172,3 +172,18 @@ Errors are returned as text beginning with the code, followed by an actionable h
 | `GIT_ERROR` / `FORGE_ERROR` | Git or GitHub/GitLab rejected the operation |
 | `PATCH_FAILED` | Edit anchor did not match uniquely |
 | `TIMEOUT` / `TOO_LARGE` / `INVALID_ARGUMENT` | Limits and argument validation |
+## Sessions, Jobs and batch reads
+
+| Tool | Needs | Parameters / behavior |
+|---|---|---|
+| session_start | read_only | workspace required, optional title; caller-owned session ID |
+| session_list | read_only | optional workspace/status; own sessions only |
+| session_info | read_only | session_id; status, operations, Jobs and evidence |
+| session_close | read_only | session_id; keeps history, refuses active Jobs |
+| job_list | read_only | optional workspace/session_id; recover own Jobs |
+| job_status | read_only | job_id, optional wait_seconds 0–30 |
+| job_log | read_only | job_id, UTF-8 byte cursor, max_bytes 1–131072; next_cursor/more/truncated |
+| job_cancel | develop | job_id; process exit confirmed before cancelled |
+| read_files | read_only | files (1–8 path/range objects), max_bytes 1024–120000; shared content budget |
+
+Preset execution also accepts wait_seconds/idempotency_key. report_changes separates typed historical results from current observed_match/unproven source evidence. Legacy logs have no inferred owner or validation. Managed deletion requires write and confirm=true. Full contracts and limits: [2.0 migration](UPGRADING-2.0.md).

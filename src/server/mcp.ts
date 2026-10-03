@@ -25,6 +25,7 @@ export function createMcpServer(): Server {
     return {
       content: [{ type: 'text' as const, text: outcome.text }],
       isError: outcome.isError,
+      structuredContent: outcome.structuredContent,
     };
   });
 
